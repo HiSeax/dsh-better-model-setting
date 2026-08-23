@@ -1,0 +1,7 @@
+﻿node_modules/
+*.tsbuildinfo
+*.tgz
+.scratch-resolve.mjs
+HANDOFF_PLAN.md
+pnpm-lock.yaml
+outputs/
