@@ -1,5 +1,5 @@
-﻿/**
- * @dsh-external/dsh-better-model-setting — client 设置面板。
+/**
+ * dsh-better-model-setting — client 设置面板。
  * 替代官方 dsh-client-ui-settings-models 的模型设置页。
  * 视觉/结构/文案对齐官方，保留新增功能：
  * 启用/禁用、思考档位、重试覆盖、拖动排序。
@@ -246,10 +246,10 @@ interface ProviderProfile {
   models?: Array<{ id: string; name?: string; reasoningEfforts?: Record<string, unknown>; contextWindow?: number; maxTokens?: number }>
   [key: string]: any
 }
-interface ModelRow { id: string; name: string; tiers: string[]; contextWindow?: number; maxTokens?: number }
+interface ModelRow { id: string; name: string; tiers: string[]; contextWindow?: number; maxTokens?: number; input?: string[] }
 interface ProviderRow {
   provider: string; displayName: string; active: boolean; kind: 'config' | 'builtin'
-  apiKeyEnv?: string; credential?: 'configured' | 'missing' | 'none'; models: ModelRow[]
+  apiKeyEnv?: string; baseURL?: string; credential?: 'configured' | 'missing' | 'none'; models: ModelRow[]
 }
 interface StatusPayload {
   documentPath?: string; writable: boolean; setting?: BetterModelSetting
@@ -326,6 +326,7 @@ function toModelRow(model: any): ModelRow | null {
     tiers: Object.keys(efforts).filter((t) => typeof t === 'string' && t.length > 0),
     contextWindow: typeof model.contextWindow === 'number' ? model.contextWindow : undefined,
     maxTokens: typeof model.maxTokens === 'number' ? model.maxTokens : undefined,
+    input: Array.isArray(model.input) ? model.input.filter((m: any) => typeof m === 'string') : undefined,
   }
 }
 function parseCapacity(text: string): number | undefined {
@@ -349,6 +350,7 @@ function toRow(id: string, profile: ProviderProfile, active: boolean, kind: 'con
   return {
     provider: id, displayName: profile.displayName || id, active, kind,
     apiKeyEnv: typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv.length > 0 ? profile.apiKeyEnv : undefined,
+    baseURL: typeof profile.baseURL === 'string' && profile.baseURL.length > 0 ? profile.baseURL : undefined,
     credential: (cred as any) ?? (profile.apiKeyEnv ? 'missing' : 'none'),
     models: Array.isArray(profile.models) ? profile.models.map(toModelRow).filter((m): m is ModelRow => m !== null) : [],
   }
@@ -462,7 +464,9 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
   const setSaveMsg = (msg: string, isError = false) => { setSaveStatus(msg); setSaveError(isError) }
 
   const [editingProvider, setEditingProvider] = React.useState<string | null>(null)
-  const [modelDraft, setModelDraft] = React.useState<Record<string, Record<string, { id?: string; name: string; context: string; maxTokens: string; tiers?: string[] }>>>({})
+  const [modelDraft, setModelDraft] = React.useState<Record<string, Record<string, { id?: string; name: string; context: string; maxTokens: string; tiers?: string[]; input?: string }>>>({})
+  // 编辑中的 provider 级字段草案（显示名称 / Base URL / API Key 环境变量 / Provider ID 重命名）
+  const [providerDraft, setProviderDraft] = React.useState<{ displayName: string; baseURL: string; apiKeyEnv: string; newProviderId: string } | null>(null)
 
   // Add-provider page state
   const [adding, setAdding] = React.useState(false)
@@ -534,6 +538,7 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
     setEditingProvider(null)
     setDirty(false)
     setModelDraft((p) => { const n = { ...p }; delete n[provider]; return n })
+    setProviderDraft(null)
     setPendingCloseProvider(null)
   }
   // 关闭编辑器前检查是否有未保存修改；discard=true 直接丢弃草稿关闭
@@ -743,6 +748,7 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
   }))
 
   // Save editor — 返回是否保存成功
+  const rowForSave = (id: string): ProviderRow | undefined => rows.find((r) => r.provider === id)
   const saveSettings = async (provider?: string): Promise<boolean> => {
     if (saveTimer.current) clearTimeout(saveTimer.current)
     setSaveBusy(true); setSaveMsg(text('applying', '保存中…'))
@@ -750,10 +756,31 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
       const nextSetting: any = { ...setting, modelEfforts: { ...(setting.modelEfforts || {}) } }
       const body: any = { op: 'apply', setting: nextSetting }
       if (provider) {
+        // Provider 级字段变更（显示名称 / Base URL / API Key env / Provider ID 重命名）
+        const pd = providerDraft
+        if (pd) {
+          const profileUpdate: Record<string, any> = {}
+          if (pd.displayName.trim() !== rowForSave(provider)?.displayName) {
+            profileUpdate.displayName = pd.displayName.trim() || provider
+          }
+          const origBaseURL = rowForSave(provider)?.baseURL || ''
+          if (pd.baseURL.trim() !== origBaseURL) {
+            if (pd.baseURL.trim()) profileUpdate.baseURL = pd.baseURL.trim()
+            else profileUpdate.baseURL = null
+          }
+          const origEnv = rowForSave(provider)?.apiKeyEnv || ''
+          if (pd.apiKeyEnv.trim() !== origEnv) {
+            profileUpdate.apiKeyEnv = pd.apiKeyEnv.trim() || undefined
+          }
+          body.providerProfile = profileUpdate
+          if (pd.newProviderId.trim() !== provider && /^[a-z][a-z0-9-]*$/.test(pd.newProviderId.trim())) {
+            body.providerIdRename = { oldId: provider, newId: pd.newProviderId.trim() }
+          }
+        }
         const draftMap = modelDraft[provider]
         if (draftMap && Object.keys(draftMap).length > 0) {
           const edits: any[] = []
-          for (const [modelId, d] of Object.entries(draftMap) as Array<[string, { id?: string; name: string; context: string; maxTokens: string; tiers?: string[] }]>) {
+          for (const [modelId, d] of Object.entries(draftMap) as Array<[string, { id?: string; name: string; context: string; maxTokens: string; tiers?: string[]; input?: string }]>) {
             if (modelId.startsWith(NEW_MODEL_PREFIX)) {
               const newId = d.id?.trim() || ''
               if (!newId) continue
@@ -772,10 +799,33 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
             const ctx = parseCapacity(d.context); if (ctx !== undefined && Number.isFinite(ctx) && ctx > 0) update.contextWindow = ctx; else if (d.context?.trim()) update.contextWindow = null
             const mt = parseCapacity(d.maxTokens); if (mt !== undefined && Number.isFinite(mt) && mt > 0) update.maxTokens = mt; else if (d.maxTokens?.trim()) update.maxTokens = null
             if (Array.isArray(d.tiers) && d.tiers.length > 0) { const efforts: Record<string, any> = {}; for (const tier of d.tiers) efforts[tier] = tier === 'off' ? null : tier; update.reasoningEfforts = efforts }
+            if (d.input !== undefined) update.input = d.input === 'multimodal' ? ['text', 'image'] : ['text']
             if (oldId !== newId) { const pm = nextSetting.modelEfforts[provider]; if (pm && pm[oldId]) { const np = { ...pm, [newId]: pm[oldId] }; delete np[oldId]; nextSetting.modelEfforts[provider] = np } }
             edits.push(update)
           }
           body.providerModels = { [provider]: edits }
+        }
+        // Provider 级字段变更（显示名称 / Base URL / API Key env / Provider ID 重命名）
+        const pd = providerDraft
+        if (pd) {
+          const orig = rowForSave(provider)
+          const profileUpdate: Record<string, any> = {}
+          if (pd.displayName.trim() !== (orig?.displayName || provider)) {
+            profileUpdate.displayName = pd.displayName.trim() || provider
+          }
+          const origBaseURL = orig?.baseURL || ''
+          if (pd.baseURL.trim() !== origBaseURL) {
+            profileUpdate.baseURL = pd.baseURL.trim() || null
+          }
+          const origEnv = orig?.apiKeyEnv || ''
+          if (pd.apiKeyEnv.trim() !== origEnv) {
+            profileUpdate.apiKeyEnv = pd.apiKeyEnv.trim() || undefined
+          }
+          if (Object.keys(profileUpdate).length > 0) body.providerProfile = profileUpdate
+          // Provider ID 重命名（需 host 迁移 provider 键）
+          if (pd.newProviderId.trim() !== provider && /^[a-z][a-z0-9-]*$/.test(pd.newProviderId.trim())) {
+            body.providerIdRename = { oldId: provider, newId: pd.newProviderId.trim() }
+          }
         }
       }
       const status = await postCommand(body)
@@ -866,6 +916,13 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
               } else {
                 setEditingProvider(provider)
                 setDirty(false)
+                // 初始化 provider 级草案（显示名称 / Base URL / API Key env / Provider ID）
+                setProviderDraft({
+                  displayName: row.displayName,
+                  baseURL: row.apiKeyEnv ? (row as any).baseURL || '' : '',
+                  apiKeyEnv: row.apiKeyEnv || '',
+                  newProviderId: provider,
+                })
               }
             },
           }, text('edit')),
@@ -880,28 +937,45 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
       ]),
       // Editor (only for configured custom providers, not disabled)
       isEditing && row.kind !== 'builtin' ? React.createElement('div', { className: 'bms-editor', key: 'editor' }, [
-        React.createElement('div', { className: 'bms-editorHeader', key: 'eh' }, [
-          React.createElement('div', { className: 'bms-editorTitle', key: 'et' },
-            text('editProvider').replace('{provider}', row.displayName)),
-          React.createElement('span', { className: 'bms-editorRoute', key: 'er' }, provider),
+        // 显示名称 / Provider ID 可编辑头部
+        React.createElement('div', { className: 'bms-field', key: 'headName' }, [
+          React.createElement('span', { className: 'bms-fieldLabel' }, text('displayName', '显示名称')),
+          React.createElement('input', {
+            className: 'bms-input', disabled: saveBusy || writable === false,
+            value: providerDraft?.displayName ?? row.displayName,
+            placeholder: row.displayName,
+            onChange: (e: any) => { setProviderDraft((d) => ({ ...(d ?? { displayName: row.displayName, baseURL: row.baseURL || '', apiKeyEnv: row.apiKeyEnv || '', newProviderId: provider }), displayName: e.target.value })); setDirty(true) },
+          }),
         ]),
-        // Base URL field
+        React.createElement('div', { className: 'bms-field', key: 'headId' }, [
+          React.createElement('span', { className: 'bms-fieldLabel' }, text('providerId', 'Provider ID')),
+          React.createElement('input', {
+            className: 'bms-input', disabled: saveBusy || writable === false,
+            value: providerDraft?.newProviderId ?? provider,
+            placeholder: provider,
+            onChange: (e: any) => { setProviderDraft((d) => ({ ...(d ?? { displayName: row.displayName, baseURL: row.baseURL || '', apiKeyEnv: row.apiKeyEnv || '', newProviderId: provider }), newProviderId: e.target.value })); setDirty(true) },
+          }),
+        ]),
+        // Base URL + API Key env fields
         (() => {
-          const apiKeyEnv = row.apiKeyEnv || ''
+          const apiKeyEnv = providerDraft?.apiKeyEnv ?? row.apiKeyEnv || ''
           return [
             React.createElement('label', { key: 'baseUrl', className: 'bms-field' }, [
               React.createElement('span', { className: 'bms-fieldLabel' }, text('baseUrl')),
               React.createElement('input', {
-                className: 'bms-input', value: '', disabled: true,
+                className: 'bms-input', disabled: saveBusy || writable === false,
+                value: providerDraft?.baseURL ?? row.baseURL || '',
                 placeholder: text('baseUrlDefault'),
+                onChange: (e: any) => { setProviderDraft((d) => ({ ...(d ?? { displayName: row.displayName, baseURL: row.baseURL || '', apiKeyEnv: row.apiKeyEnv || '', newProviderId: provider }), baseURL: e.target.value })); setDirty(true) },
               }),
             ]),
             React.createElement('label', { key: 'keyEnv', className: 'bms-field' }, [
               React.createElement('span', { className: 'bms-fieldLabel' }, text('keyInput')),
               React.createElement('input', {
-                className: 'bms-input', value: apiKeyEnv || '', disabled: true,
-                placeholder: apiKeyEnv ? text('keyEnvLocked') : text('keyPlaceholder'),
+                className: 'bms-input', disabled: saveBusy || writable === false,
+                value: apiKeyEnv, placeholder: apiKeyEnv ? text('keyEnvLocked') : text('keyPlaceholder'),
                 style: { fontFamily: 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace' },
+                onChange: (e: any) => { setProviderDraft((d) => ({ ...(d ?? { displayName: row.displayName, baseURL: row.baseURL || '', apiKeyEnv: row.apiKeyEnv || '', newProviderId: provider }), apiKeyEnv: e.target.value })); setDirty(true) },
               }),
             ]),
             // Retry (added feature)
@@ -940,7 +1014,7 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
                     const nameVal = draftEntry ? draftEntry.name : model.name
                     const ctxVal = draftEntry ? draftEntry.context : formatCapacity(model.contextWindow!)
                     const mtVal = draftEntry ? draftEntry.maxTokens : formatCapacity(model.maxTokens!)
-                    const setDraftField = (field: 'id' | 'name' | 'context' | 'maxTokens', value: string) => {
+                    const setDraftField = (field: 'id' | 'name' | 'context' | 'maxTokens' | 'input', value: string) => {
                       setModelDraft((prev) => ({
                         ...prev,
                         [provider]: {
@@ -950,6 +1024,7 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
                             name: prev[provider]?.[model.id]?.name ?? model.name,
                             context: prev[provider]?.[model.id]?.context ?? formatCapacity(model.contextWindow!),
                             maxTokens: prev[provider]?.[model.id]?.maxTokens ?? formatCapacity(model.maxTokens!),
+                            input: prev[provider]?.[model.id]?.input ?? (model.input?.includes('image') ? 'multimodal' : 'text'),
                             [field]: value,
                           },
                         },
@@ -1017,6 +1092,19 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
                             value: mtVal, placeholder: text('maxTokensPlaceholder'),
                             onChange: (e: any) => setDraftField('maxTokens', e.target.value),
                           }),
+                        ]),
+                        // 模态选择（大语言/多模态）
+                        React.createElement('label', { className: 'bms-modelField' }, [
+                          React.createElement('span', { className: 'bms-modelFieldLabel' }, '模态'),
+                          React.createElement('select', {
+                            className: 'bms-input bms-selectInput',
+                            value: draftEntry?.input ?? (model.input?.includes('image') ? 'multimodal' : 'text'),
+                            disabled: saveBusy || writable === false,
+                            onChange: (e: any) => setDraftField('input', e.target.value),
+                          }, [
+                            React.createElement('option', { key: 'text', value: 'text' }, '大语言'),
+                            React.createElement('option', { key: 'multimodal', value: 'multimodal' }, '多模态'),
+                          ]),
                         ]),
                         // 思考档位 (added)
                         React.createElement('label', { className: 'bms-modelField', style: { gridColumn: '1 / -1' } }, [

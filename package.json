@@ -1,8 +1,8 @@
 {
-  "name": "@dsh-external/dsh-better-model-setting",
-  "version": "0.0.1",
-  "description": "Better model settings: enable/disable models, per-model reasoning effort, per-provider retry overrides",
-  "private": true,
+  "name": "dsh-better-model-setting",
+  "version": "0.1.0",
+  "description": "DSH plugin that replaces the official Models settings page: provider management, per-model reasoning effort, retry overrides, drag reorder, credential status, route token auth",
+  "private": false,
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
