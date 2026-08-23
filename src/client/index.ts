@@ -756,27 +756,6 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
       const nextSetting: any = { ...setting, modelEfforts: { ...(setting.modelEfforts || {}) } }
       const body: any = { op: 'apply', setting: nextSetting }
       if (provider) {
-        // Provider 级字段变更（显示名称 / Base URL / API Key env / Provider ID 重命名）
-        const pd = providerDraft
-        if (pd) {
-          const profileUpdate: Record<string, any> = {}
-          if (pd.displayName.trim() !== rowForSave(provider)?.displayName) {
-            profileUpdate.displayName = pd.displayName.trim() || provider
-          }
-          const origBaseURL = rowForSave(provider)?.baseURL || ''
-          if (pd.baseURL.trim() !== origBaseURL) {
-            if (pd.baseURL.trim()) profileUpdate.baseURL = pd.baseURL.trim()
-            else profileUpdate.baseURL = null
-          }
-          const origEnv = rowForSave(provider)?.apiKeyEnv || ''
-          if (pd.apiKeyEnv.trim() !== origEnv) {
-            profileUpdate.apiKeyEnv = pd.apiKeyEnv.trim() || undefined
-          }
-          body.providerProfile = profileUpdate
-          if (pd.newProviderId.trim() !== provider && /^[a-z][a-z0-9-]*$/.test(pd.newProviderId.trim())) {
-            body.providerIdRename = { oldId: provider, newId: pd.newProviderId.trim() }
-          }
-        }
         const draftMap = modelDraft[provider]
         if (draftMap && Object.keys(draftMap).length > 0) {
           const edits: any[] = []
@@ -958,13 +937,13 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
         ]),
         // Base URL + API Key env fields
         (() => {
-          const apiKeyEnv = providerDraft?.apiKeyEnv ?? row.apiKeyEnv || ''
+          const apiKeyEnv = (providerDraft?.apiKeyEnv ?? row.apiKeyEnv) || ''
           return [
             React.createElement('label', { key: 'baseUrl', className: 'bms-field' }, [
               React.createElement('span', { className: 'bms-fieldLabel' }, text('baseUrl')),
               React.createElement('input', {
                 className: 'bms-input', disabled: saveBusy || writable === false,
-                value: providerDraft?.baseURL ?? row.baseURL || '',
+                value: (providerDraft?.baseURL ?? row.baseURL) || '',
                 placeholder: text('baseUrlDefault'),
                 onChange: (e: any) => { setProviderDraft((d) => ({ ...(d ?? { displayName: row.displayName, baseURL: row.baseURL || '', apiKeyEnv: row.apiKeyEnv || '', newProviderId: provider }), baseURL: e.target.value })); setDirty(true) },
               }),
@@ -973,7 +952,8 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
               React.createElement('span', { className: 'bms-fieldLabel' }, text('keyInput')),
               React.createElement('input', {
                 className: 'bms-input', disabled: saveBusy || writable === false,
-                value: apiKeyEnv, placeholder: apiKeyEnv ? text('keyEnvLocked') : text('keyPlaceholder'),
+                value: (providerDraft?.apiKeyEnv ?? row.apiKeyEnv) || '',
+                placeholder: apiKeyEnv ? text('keyEnvLocked') : text('keyPlaceholder'),
                 style: { fontFamily: 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace' },
                 onChange: (e: any) => { setProviderDraft((d) => ({ ...(d ?? { displayName: row.displayName, baseURL: row.baseURL || '', apiKeyEnv: row.apiKeyEnv || '', newProviderId: provider }), apiKeyEnv: e.target.value })); setDirty(true) },
               }),

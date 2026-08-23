@@ -122,7 +122,7 @@ export type BetterModelSetting = Schemastery.TypeT<typeof BetterModelSettingSche
 // Plugin definition
 // ---------------------------------------------------------------------------
 
-export const name = 'dsh-better-model-setting'
+export const name = '@dsh-external/dsh-better-model-setting'
 export const inject = ['settings', 'llm', 'webServer', 'credentials']
 
 export interface Config {}
@@ -394,12 +394,67 @@ export function apply(ctx: any, _config: Config): void {
     }
   }
 
-  async function handleApply(candidate: any, providerModels?: any): Promise<void> {
+  async function handleApply(candidate: any, providerModels?: any, providerProfile?: any, providerIdRename?: any): Promise<void> {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
       throw new Error('expected a settings object')
     }
     backupYaml()
-    await scope.replace(candidate)
+
+    // Provider ID 重命名：先迁移 llm-pi-ai.providers 键，再迁移插件命名空间与 DB
+    if (providerIdRename && typeof providerIdRename === 'object' &&
+        typeof providerIdRename.oldId === 'string' && typeof providerIdRename.newId === 'string' &&
+        providerIdRename.oldId !== providerIdRename.newId) {
+      const llmConfig: any = ctx.settings.get(LLM_NS)
+      const providers = (llmConfig && llmConfig.providers && typeof llmConfig.providers === 'object') ? llmConfig.providers : {}
+      const oldProfile = providers[providerIdRename.oldId]
+      if (oldProfile === undefined) throw new Error(`provider "${providerIdRename.oldId}" not found`)
+      if (providers[providerIdRename.newId] !== undefined) throw new Error(`provider "${providerIdRename.newId}" already exists`)
+      await ctx.settings.mutate(LLM_NS, [
+        { op: 'set', path: ['providers', providerIdRename.newId], value: oldProfile },
+        { op: 'unset', path: ['providers', providerIdRename.oldId] },
+      ])
+      // 迁移插件命名空间：modelEfforts / providerRetryOverrides / providerOrder
+      const next = { ...candidate }
+      if (next.modelEfforts?.[providerIdRename.oldId]) { const m = { ...next.modelEfforts }; m[providerIdRename.newId] = m[providerIdRename.oldId]; delete m[providerIdRename.oldId]; next.modelEfforts = m }
+      if (next.providerRetryOverrides?.[providerIdRename.oldId]) { const r = { ...next.providerRetryOverrides }; r[providerIdRename.newId] = r[providerIdRename.oldId]; delete r[providerIdRename.oldId]; next.providerRetryOverrides = r }
+      next.providerOrder = (next.providerOrder || []).map((id: string) => id === providerIdRename.oldId ? providerIdRename.newId : id)
+      // 迁移 DB 快照键
+      const db = readDb()
+      if (db.disabledProviders?.[providerIdRename.oldId]) {
+        db.disabledProviders[providerIdRename.newId] = db.disabledProviders[providerIdRename.oldId]
+        delete db.disabledProviders[providerIdRename.oldId]
+        db.disabledOrder = db.disabledOrder?.map((id: string) => id === providerIdRename.oldId ? providerIdRename.newId : id)
+        writeDb(db)
+        syncDisabledSet()
+      }
+      await scope.replace(next)
+      candidate = next
+    } else {
+      await scope.replace(candidate)
+    }
+
+    // Provider 级字段合并回 llm-pi-ai.providers（显示名称 / Base URL / apiKeyEnv）
+    if (providerProfile && typeof providerProfile === 'object' && !Array.isArray(providerProfile)) {
+      const targetProvider = providerIdRename?.newId || (providerModels ? Object.keys(providerModels)[0] : undefined)
+      if (targetProvider) {
+        const llmConfig: any = ctx.settings.get(LLM_NS)
+        const providers = (llmConfig && llmConfig.providers && typeof llmConfig.providers === 'object') ? llmConfig.providers : {}
+        const profile = providers[targetProvider]
+        if (profile && typeof profile === 'object') {
+          const nextProfile = { ...profile }
+          if (typeof providerProfile.displayName === 'string' && providerProfile.displayName.length > 0) nextProfile.displayName = providerProfile.displayName
+          if ('baseURL' in providerProfile) {
+            if (typeof providerProfile.baseURL === 'string' && providerProfile.baseURL.length > 0) nextProfile.baseURL = providerProfile.baseURL
+            else delete nextProfile.baseURL
+          }
+          if ('apiKeyEnv' in providerProfile) {
+            if (typeof providerProfile.apiKeyEnv === 'string' && providerProfile.apiKeyEnv.length > 0) nextProfile.apiKeyEnv = providerProfile.apiKeyEnv
+            else delete nextProfile.apiKeyEnv
+          }
+          await ctx.settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', targetProvider], value: nextProfile }])
+        }
+      }
+    }
 
     // Merge model name / context-window edits back into llm-pi-ai providers,
     // preserving every other field already present in settings.yaml.
@@ -408,8 +463,10 @@ export function apply(ctx: any, _config: Config): void {
       const providers = (llmConfig && llmConfig.providers && typeof llmConfig.providers === 'object')
         ? llmConfig.providers
         : {}
-      for (const provider of Object.keys(providerModels)) {
-        const updates = providerModels[provider]
+      for (const rawProvider of Object.keys(providerModels)) {
+        // 若该 provider 被重命名，将 key 映射到新 id
+        const provider = (providerIdRename && rawProvider === providerIdRename.oldId) ? providerIdRename.newId : rawProvider
+        const updates = providerModels[rawProvider]
         if (!Array.isArray(updates)) continue
         const profile = providers[provider]
         if (!profile || typeof profile !== 'object') continue
@@ -655,7 +712,7 @@ export function apply(ctx: any, _config: Config): void {
               return json(res, 200, { ok: true, value: await buildStatus() })
             }
             case 'apply':
-              await handleApply(body.setting, body.providerModels)
+              await handleApply(body.setting, body.providerModels, body.providerProfile, body.providerIdRename)
               return json(res, 200, { ok: true, value: await buildStatus() })
             case 'addOfficial': {
               await handleAddOfficial(
