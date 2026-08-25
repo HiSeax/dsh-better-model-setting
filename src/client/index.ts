@@ -81,6 +81,7 @@ const ZH: Record<string, string> = {
   effortTitle: '每模型思考强度档位',
   applyTier: '应用档位',
   defaultTier: '默认',
+  effortUnset: '未设置',
   displayTiers: '前端显示档位',
   editProviderSettings: '编辑 {provider}',
   providerId: '提供方 ID',
@@ -1094,7 +1095,8 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
                             value: selected, disabled: saveBusy || writable === false || whitelist.length === 0,
                             onChange: (e: any) => setEffortSelected(provider, model.id, e.target.value),
                           }, [
-                            React.createElement('option', { key: '', value: '' }, text('defaultTier', '默认')),
+                            // 空值占位（未设置思考档位时显示，用户只能主动选具体档位）
+                            React.createElement('option', { key: '', value: '', disabled: true }, text('effortUnset', '未设置')),
                             ...whitelist.map((tier: string) => React.createElement('option', { key: tier, value: tier }, tier)),
                           ]),
                         ]),
