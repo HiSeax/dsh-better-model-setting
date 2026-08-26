@@ -398,10 +398,28 @@ function sortRowsWithDisabled(rows: ProviderRow[], order?: string[], disabledOrd
 }
 
 // api wrapper filter state
-const filterState = { hidden: new Set<string>(), order: [] as string[] }
+const filterState = { hidden: new Set<string>(), order: [] as string[], efforts: {} as Record<string, Record<string, string>> }
 function syncFilterState(status?: StatusPayload) {
   filterState.hidden = new Set(status?.builtinDisabled || [])
   filterState.order = status?.providerOrder || []
+  // 记录每 provider/model 的 selected 思考档位（供模型选择器切换时自动注入）
+  const efforts: Record<string, Record<string, string>> = {}
+  const me = status?.setting?.modelEfforts
+  if (me && typeof me === 'object') {
+    for (const provider of Object.keys(me)) {
+      const models = me[provider]
+      if (!models || typeof models !== 'object') continue
+      for (const model of Object.keys(models)) {
+        const entry: any = models[model]
+        const selected = typeof entry === 'string' ? entry : entry?.selected
+        if (typeof selected === 'string' && selected.length > 0) {
+          efforts[provider] = efforts[provider] || {}
+          efforts[provider][model] = selected
+        }
+      }
+    }
+  }
+  filterState.efforts = efforts
 }
 function applyOrder<T extends { id?: string }>(items: T[], order: string[]): T[] {
   if (!Array.isArray(order) || order.length === 0) return items
@@ -1472,6 +1490,24 @@ export function apply(ctx: any): void {
       face[key] = wrapped
       disposers.push(() => { if (face[key] === wrapped) face[key] = orig })
     }
+    // 包装 selectModel：切模型时若未显式指定思考档位，自动注入插件为该模型配置的 selected 档位
+    const wrapSelectModel = (face: any) => {
+      if (!face || typeof face !== 'object') return
+      const orig = face.selectModel
+      if (typeof orig !== 'function' || (orig as any).__bmsSelectWrapped) return
+      const wrapped = async (request: any, ...rest: any[]) => {
+        const eff = request && typeof request === 'object'
+          ? filterState.efforts[request.provider]?.[request.model]
+          : undefined
+        if (typeof eff === 'string' && eff.length > 0 && request && request.reasoningEffort === undefined) {
+          return orig.call(face, { ...request, reasoningEffort: eff }, ...rest)
+        }
+        return orig.call(face, request, ...rest)
+      }
+      ;(wrapped as any).__bmsSelectWrapped = true
+      face.selectModel = wrapped
+      disposers.push(() => { if (face.selectModel === wrapped) face.selectModel = orig })
+    }
     const getConnection = (): any => {
       try { if (typeof ctx.get === 'function') { const conn = ctx.get('connection'); if (conn && typeof conn === 'object') return conn } } catch {}
       return ctx.connection
@@ -1485,6 +1521,9 @@ export function apply(ctx: any): void {
       }
       wrapModels(api.sessions, 'models', filterDirectoryResponse)
       wrapModels(api.session, 'models', filterDirectoryResponse)
+      // 切模型时自动注入插件配置的思考档位
+      wrapSelectModel(api.sessions)
+      wrapSelectModel(api.session)
     }
     wrapFaces()
     if (typeof ctx.on === 'function') ctx.on('connection/reset', wrapFaces)
