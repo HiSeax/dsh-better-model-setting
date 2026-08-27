@@ -1,7 +1,4 @@
-import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
-
-const PLUGIN_ID = "@dsh-external/dsh-better-model-setting"
 
 const CLIENT_EXTERNALS = [
   'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
@@ -27,8 +24,8 @@ const clientBundle: UserConfig = {
   },
   outputOptions: {
     entryFileNames: 'client.js',
-    banner: 'window.__ModuleLoader__.load({ id: ' + JSON.stringify(PLUGIN_ID) + ', factory: (require) => {',
-    footer: 'return module.exports; } });',
+    banner: '((factory) => { ["dsh-better-model-setting", "@dsh-external/dsh-better-model-setting"].forEach((id) => window.__ModuleLoader__.load({ id, factory })); })((require) => {',
+    footer: 'return module.exports; });',
     intro: 'var module = { exports: {} }; var exports = module.exports;',
     codeSplitting: false,
   },
