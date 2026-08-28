@@ -1,7 +1,7 @@
 {
   "name": "dsh-better-model-setting",
-  "version": "0.2.0",
-  "description": "DSH plugin that replaces the official Models settings page: provider management, per-model reasoning effort, retry overrides, drag reorder, credential status, route token auth",
+  "version": "0.3.0",
+  "description": "DSH plugin that replaces the official Models settings page: provider management, per-model reasoning effort, retry overrides, drag reorder, credential status, route token auth, **upstream model sync (per-provider + global, default unselected)**, and fixed ✕-delete-model bug",
   "private": false,
   "type": "module",
   "main": "./lib/index.js",

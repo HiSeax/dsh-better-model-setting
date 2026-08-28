@@ -57,17 +57,21 @@
 | **编辑草稿** | 思考档位 / 重试次数修改只存本地草稿 → 点击"保存"才落盘 → 关闭编辑器如有未保存修改弹窗三选（不保存 / 保存 / 取消） |
 | **路由安全** | 自建 loopback HTTP route `GET /api/plugins/better-model-setting` 只读返回状态；POST 写操作需携带 `X-BMS-Token`（进程随机生成，首次 GET 下发） |
 | **自动备份** | 每次写 settings.yaml 前自动备份到 `better-model-setting-backups/` 目录，保留最近 5 份，tmp+rename 原子写入 |
+| **🆕 同步上游模型（v0.3.0）** | 单 provider 「同步上游」（编辑器内）+ 顶部「一键同步所有上游」；走官方 `ctx.llm.discoverModels('llm-pi-ai', …)` 同款接口（内置 catalog 直接返回目录；自定义 provider 走 baseURL 实际拉取）；弹窗默认**全部未选**（与官方 fetchModels 一致），用户主动勾选要添加的；已存在的 model id 跳过不覆盖保留用户自定义 |
+| **🆕 修 ✕-delete-model bug（v0.3.0）** | 之前点 ✕ 只清本地草稿，模型仍然留在 `settings.yaml`；v0.3.0 起客户端跟踪 `deletedModelIds`，提交时由 host 从 `providers[provider].models` 真正移除，并同步清理该 provider 的 `modelEfforts` 残留 |
 
 ### 架构
 
 ```
 Host 侧 (src/index.ts)
-├── HTTP route ─ GET(status) / POST(disable|enable|add|apply|addOfficial|delete)
+├── HTTP route ─ GET(status) / POST(disable|enable|add|apply|addOfficial|delete|discover|addModels)
 ├── Settings namespace ─ builtinDisabled / providerOrder / modelEfforts / providerRetryOverrides / officialAdded
 ├── JSON DB ─ disabledProviders 快照存储 + disabledOrder
 ├── agent/request 拦截 ─ 禁用 provider 守卫 + reasoningEffort 注入 + 白名单校验
 ├── agent/request-error 拦截 ─ retry policy 覆盖 + finally 还原
 ├── Credentials 集成 ─ ctx.credentials.resolve() 读取凭据状态
+├── handleDiscover ─ 调 ctx.llm.discoverModels('llm-pi-ai', { provider, baseURL, api, apiKey }) 上游拉取
+├── handleApply (扩展) ─ providerDeleteModels 真删 + providerAddModels 批量添加（已存在跳过）
 └── backup ─ settings.yaml 写前备份（保留 5 份，3s 节流）
 
 Client 侧 (src/client/index.ts)
@@ -75,11 +79,14 @@ Client 侧 (src/client/index.ts)
 ├── Provider 行卡片 ─ 名称 + 凭据圆点 + 三按钮（禁用/启用 + 编辑 + 删除）
 ├── 编辑器 ─ Base URL / API 密钥 / 重试次数 / 模型目录（<details> 折叠）
 │   ├── 模型条目 ─ ID / 显示名称 / 容量（上下文窗口 + 输出 tokens）/ 思考档位芯片
+│   ├── 「同步上游」链接 ─ 单 provider discover → 候选弹窗（默认全未选）
 │   └── 添加模型按钮（底部，对齐官方布局）
+├── 顶部「一键同步所有上游」─ 遍历 syncableProviders 批量 discover → 多 provider 候选弹窗
 ├── 添加自定义提供方 ─ Provider ID 校验 + 协议选择 + API 地址 + 模型列表
 ├── 添加官方模型 ─ 表单卡片（环境变量名 + API Key 输入）
 ├── 删除确认弹窗 ─ 覆盖层 + 对话框（ESC 关闭）
 ├── 未保存修改弹窗 ─ 三选项（不保存 / 保存 / 取消）
+├── deletedModelIds 跟踪 ─ ✕ 删 model 显式入列 → apply 提交给 host 真删
 ├── 拖拽排序 ─ HTML5 DnD + auto-squeeze 动画
 └── API wrapper ─ 过滤内置 provider 隐藏 + 重排 provider 顺序（monkey-patch api.llm / api.sessions）
 ```
@@ -147,6 +154,8 @@ A DSH hybrid plugin that enhances the Models settings page with full provider li
 | **Edit Draft** | Effort / retry changes kept in local state only "Save" button persists to server closing with unsaved changes shows a 3-choice dialog (Discard / Save / Cancel) |
 | **Route Security** | Loopback-only HTTP route `GET /api/plugins/better-model-setting` (read-only status); POST write operations require `X-BMS-Token` header (randomly generated per process, delivered on first GET) |
 | **Auto Backup** | `settings.yaml` is backed up before every write to `better-model-setting-backups/` directory (keeps 5 copies, tmp+rename atomic writes, 3s throttle) |
+| **🆕 Sync Upstream Models (v0.3.0)** | Per-provider "Sync Upstream" link inside the editor + top-level "Sync All Upstream Models" button; uses the official `ctx.llm.discoverModels('llm-pi-ai', …)` interface (built-in catalog providers return the pi-ai catalog directly; custom providers hit the `baseURL`); picker modal shows candidates **default-unselected** (matching the official `fetchModels` behavior), user opts in to add; already-existing model ids are skipped to preserve user customizations |
+| **🆕 Fix ✕-delete-model bug (v0.3.0)** | Previously clicking ✕ only cleared the local draft and the model stayed in `settings.yaml`; v0.3.0 tracks `deletedModelIds` client-side and the host removes them from `providers[provider].models` on save, with a sweep of the `modelEfforts` residue for that provider |
 
 ### Architecture
 

@@ -308,6 +308,33 @@ export function apply(ctx: any, _config: Config): void {
     }
   }
 
+  // OP-43: 返回一组「可同步上游模型」的 provider id：内置 catalog provider + 任何显式配置了 baseURL 的启用 provider
+  // provider 内联 baseURL/apiKeyEnv（无密钥原文）便于客户端直接弹窗展示
+  function buildSyncableProviders(enabledProviders: Record<string, any>): Array<{ provider: string; displayName: string; baseURL?: string; apiKeyEnv?: string; api?: string }> {
+    const out: Array<{ provider: string; displayName: string; baseURL?: string; apiKeyEnv?: string; api?: string }> = []
+    // pi-ai 内置 catalog providers（不需要 baseURL，discoverModels 会从 catalog 返回）
+    const seen = new Set<string>()
+    for (const id of Object.keys(BUILTIN_PROVIDERS)) {
+      if (BUILTIN_PROVIDERS[id] !== undefined) {
+        out.push({ provider: id, displayName: BUILTIN_PROVIDERS[id] })
+        seen.add(id)
+      }
+    }
+    for (const [id, profile] of Object.entries(enabledProviders || {})) {
+      if (seen.has(id)) continue
+      if (!profile || typeof profile !== 'object') continue
+      const entry: { provider: string; displayName: string; baseURL?: string; apiKeyEnv?: string; api?: string } = {
+        provider: id, displayName: typeof profile.displayName === 'string' && profile.displayName.length > 0 ? profile.displayName : id,
+      }
+      if (typeof profile.baseURL === 'string' && profile.baseURL.length > 0) entry.baseURL = profile.baseURL
+      if (typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv.length > 0) entry.apiKeyEnv = profile.apiKeyEnv
+      if (typeof profile.api === 'string' && profile.api.length > 0) entry.api = profile.api
+      // 只要声明了 baseURL（端点已知）就纳入；否则 pi-ai 无 catalog 时不会返回模型，留给用户自行选 baseURL
+      if (entry.baseURL) out.push(entry)
+    }
+    return out
+  }
+
   async function buildStatus(): Promise<any> {
     const llmConfig: any = ctx.settings.get(LLM_NS)
     const enabledProviders = (llmConfig && llmConfig.providers && typeof llmConfig.providers === 'object')
@@ -336,6 +363,8 @@ export function apply(ctx: any, _config: Config): void {
       builtinProviders: { ...BUILTIN_PROVIDERS },
       builtinDisabled: Array.isArray(setting.builtinDisabled) ? setting.builtinDisabled : [],
       providerOrder: Array.isArray(setting.providerOrder) ? setting.providerOrder : [],
+      // OP-43: 全局「同步上游」的可同步 provider 列表（catalog provider + 任何配置了 baseURL 的启用 provider）
+      syncableProviders: buildSyncableProviders(enabledProviders),
     }
   }
 
@@ -394,7 +423,7 @@ export function apply(ctx: any, _config: Config): void {
     }
   }
 
-  async function handleApply(candidate: any, providerModels?: any, providerProfile?: any, providerIdRename?: any): Promise<void> {
+  async function handleApply(candidate: any, providerModels?: any, providerProfile?: any, providerIdRename?: any, providerDeleteModels?: any, providerAddModels?: any): Promise<void> {
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
       throw new Error('expected a settings object')
     }
@@ -534,6 +563,114 @@ export function apply(ctx: any, _config: Config): void {
         }
       }
     }
+
+    // OP-39: 模型删除 —— `providerDeleteModels: { [provider]: string[] }`
+    // 编辑器里点 ✕ 删一个 model（不在 modelDraft[provider] 里出现，但被显式标记删除）时，
+    // 客户端会把 id 放进这个数组；host 必须真的把它从 llm-pi-ai.providers[provider].models 里去掉。
+    if (providerDeleteModels && typeof providerDeleteModels === 'object' && !Array.isArray(providerDeleteModels)) {
+      for (const rawProvider of Object.keys(providerDeleteModels)) {
+        const provider = (providerIdRename && rawProvider === providerIdRename.oldId) ? providerIdRename.newId : rawProvider
+        const ids = providerDeleteModels[rawProvider]
+        if (!Array.isArray(ids) || ids.length === 0) continue
+        const llmConfig: any = ctx.settings.get(LLM_NS)
+        const providers = (llmConfig && llmConfig.providers && typeof llmConfig.providers === 'object') ? llmConfig.providers : {}
+        const profile = providers[provider]
+        if (!profile || typeof profile !== 'object') continue
+        const existing = Array.isArray(profile.models) ? profile.models : []
+        const removeSet = new Set<string>(ids.filter((id: unknown) => typeof id === 'string' && (id as string).length > 0))
+        if (removeSet.size === 0) continue
+        const kept = existing.filter((m: any) => !(m && typeof m === 'object' && typeof m.id === 'string' && removeSet.has(m.id)))
+        if (kept.length !== existing.length) {
+          await ctx.settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', provider, 'models'], value: kept }])
+          // 同步清理该 provider 下被删 model 的 modelEfforts 残留
+          const me = current.modelEfforts?.[provider]
+          if (me && typeof me === 'object') {
+            let meChanged = false
+            const meNext: Record<string, any> = { ...me }
+            for (const id of removeSet) if (id in meNext) { delete meNext[id]; meChanged = true }
+            if (meChanged) {
+              const settingNext = { ...current, modelEfforts: { ...current.modelEfforts, [provider]: meNext } }
+              await scope.replace(settingNext)
+            }
+          }
+        }
+      }
+    }
+
+    // OP-40: 同步上游模型列表后批量添加 —— `providerAddModels: { [provider]: Array<{id, name?, contextWindow?, maxTokens?}> }`
+    // 全局"同步所有上游" / 单 provider "同步上游" 弹窗中用户勾选的模型，由 host 直接写入 providers[provider].models
+    // （与现有 model 合并；同 id 视为已存在，跳过不覆盖以保留用户在该模型上的自定义字段）
+    if (providerAddModels && typeof providerAddModels === 'object' && !Array.isArray(providerAddModels)) {
+      for (const rawProvider of Object.keys(providerAddModels)) {
+        const provider = (providerIdRename && rawProvider === providerIdRename.oldId) ? providerIdRename.newId : rawProvider
+        const entries = providerAddModels[rawProvider]
+        if (!Array.isArray(entries) || entries.length === 0) continue
+        const llmConfig: any = ctx.settings.get(LLM_NS)
+        const providers = (llmConfig && llmConfig.providers && typeof llmConfig.providers === 'object') ? llmConfig.providers : {}
+        const profile = providers[provider]
+        if (!profile || typeof profile !== 'object') {
+          throw new Error(`provider "${provider}" not configured; add it before syncing upstream models`)
+        }
+        const existing = Array.isArray(profile.models) ? profile.models : []
+        const byId = new Map<string, any>()
+        for (const m of existing) {
+          if (m && typeof m === 'object' && typeof m.id === 'string') byId.set(m.id, m)
+        }
+        let added = 0
+        for (const e of entries) {
+          if (!e || typeof e !== 'object' || typeof e.id !== 'string' || e.id.length === 0) continue
+          if (byId.has(e.id)) continue // 已存在的不覆盖，保留用户自定义
+          const next: Record<string, any> = { id: e.id }
+          if (typeof e.name === 'string' && e.name.length > 0) next.name = e.name
+          if (typeof e.contextWindow === 'number' && Number.isFinite(e.contextWindow) && e.contextWindow > 0) next.contextWindow = e.contextWindow
+          if (typeof e.maxTokens === 'number' && Number.isFinite(e.maxTokens) && e.maxTokens > 0) next.maxTokens = e.maxTokens
+          byId.set(e.id, next)
+          added++
+        }
+        if (added > 0) {
+          await ctx.settings.mutate(LLM_NS, [{ op: 'set', path: ['providers', provider, 'models'], value: [...byId.values()] }])
+        }
+      }
+    }
+  }
+
+  // OP-41: 同步上游模型 —— 调用 dsh-llm 官方注册的 discoverModels 拿到上游目录
+  // provider: 必填（route id），baseURL/api/apiKey 可选（draft 覆盖）；无 baseURL 时若该 provider 在 pi-ai 内置目录中，host 会从目录返回
+  async function handleDiscover(provider: string, request: any): Promise<{ models: any[] }> {
+    if (typeof provider !== 'string' || provider.length === 0) throw new Error('provider is required')
+    const llmConfig: any = ctx.settings.get(LLM_NS)
+    const providers = (llmConfig && llmConfig.providers && typeof llmConfig.providers === 'object') ? llmConfig.providers : {}
+    const profile = providers[provider]
+    // baseURL: 客户端提供优先；缺省回退到 profile.baseURL
+    const baseURL = (request && typeof request.baseURL === 'string' && request.baseURL.length > 0)
+      ? request.baseURL
+      : (profile && typeof profile.baseURL === 'string' ? profile.baseURL : undefined)
+    const api = (request && typeof request.api === 'string' && request.api.length > 0)
+      ? request.api
+      : (profile && typeof profile.api === 'string' ? profile.api : undefined)
+    // apiKey: 客户端明文优先；缺省回退到 credentials.resolve(profile.apiKeyEnv)
+    let apiKey: string | undefined
+    if (request && typeof request.apiKey === 'string' && request.apiKey.length > 0) apiKey = request.apiKey
+    if (!apiKey && profile && typeof profile.apiKeyEnv === 'string' && profile.apiKeyEnv.length > 0) {
+      try {
+        const resolved = await ctx.credentials?.resolve(profile.apiKeyEnv)
+        if (typeof resolved === 'string' && resolved.length > 0) apiKey = resolved
+      } catch { /* missing/throw: fall through; discoverModels will surface DISCOVERY_FAILED */ }
+    }
+    if (!apiKey && BUILTIN_PROVIDERS[provider] !== undefined && provider === 'deepseek-official') {
+      const envName = profile?.apiKeyEnv && typeof profile.apiKeyEnv === 'string' ? profile.apiKeyEnv : 'DEEPSEEK_API_KEY'
+      try {
+        const resolved = await ctx.credentials?.resolve(envName)
+        if (typeof resolved === 'string' && resolved.length > 0) apiKey = resolved
+        else if (typeof process.env[envName] === 'string' && process.env[envName].length > 0) apiKey = process.env[envName]
+      } catch { /* same */ }
+    }
+    const discoverRequest: any = { provider }
+    if (baseURL) discoverRequest.baseURL = baseURL
+    if (api) discoverRequest.api = api
+    if (apiKey) discoverRequest.apiKey = apiKey
+    const models = await ctx.llm.discoverModels(LLM_NS, discoverRequest)
+    return { models: Array.isArray(models) ? models : [] }
   }
 
   // Add a new pi-ai provider: write its profile into llm-pi-ai.providers so DSH
@@ -712,8 +849,20 @@ export function apply(ctx: any, _config: Config): void {
               return json(res, 200, { ok: true, value: await buildStatus() })
             }
             case 'apply':
-              await handleApply(body.setting, body.providerModels, body.providerProfile, body.providerIdRename)
+              await handleApply(body.setting, body.providerModels, body.providerProfile, body.providerIdRename, body.providerDeleteModels, body.providerAddModels)
               return json(res, 200, { ok: true, value: await buildStatus() })
+            case 'discover': {
+              if (typeof body.provider !== 'string' || !body.provider) {
+                return json(res, 400, { ok: false, error: { message: 'provider is required' } })
+              }
+              const result = await handleDiscover(body.provider, body.request)
+              return json(res, 200, { ok: true, value: result })
+            }
+            case 'addModels': {
+              // OP-42: 与 'apply' 共享 providerAddModels 路径；可单独使用以仅添加模型
+              await handleApply(current, undefined, undefined, undefined, undefined, body.providerAddModels)
+              return json(res, 200, { ok: true, value: await buildStatus() })
+            }
             case 'addOfficial': {
               await handleAddOfficial(
                 typeof body.apiKey === 'string' ? body.apiKey : undefined,

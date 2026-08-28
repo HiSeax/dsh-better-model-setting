@@ -97,6 +97,17 @@ const ZH: Record<string, string> = {
   addModelHint: '可选：添加提供方下的模型。',
   hide: '收起',
   show: '展开',
+  fetching: '正在拉取…',
+  fetchEmpty: '上游未公布任何模型',
+  fetchSelectAll: '全部选择',
+  fetchDeselectAll: '全部取消',
+  fetchAdopt: '采用所选',
+  syncUpstream: '同步上游',
+  syncUpstreamAll: '一键同步所有上游',
+  syncUpstreamAllTitle: '同步所有上游模型',
+  syncUpstreamOneTitle: '同步 {provider} 的上游模型',
+  syncUpstreamHint: '勾选要添加的模型（默认全部未选）；已存在于本提供方下的会跳过。',
+  loading: '加载中…',
 }
 
 function t(key: string): string {
@@ -260,7 +271,10 @@ interface StatusPayload {
   credentials?: Record<string, string>
   builtinProviders?: Record<string, string>
   builtinDisabled?: string[]; providerOrder?: string[]
+  syncableProviders?: Array<{ provider: string; displayName: string; baseURL?: string; apiKeyEnv?: string; api?: string }>
 }
+interface DiscoveredModel { id: string; name?: string; contextWindow?: number; maxTokens?: number }
+interface ProviderSyncGroup { provider: string; displayName: string; ok: boolean; models: DiscoveredModel[]; error?: string }
 
 // ---------------------------------------------------------------------------
 // API
@@ -287,6 +301,17 @@ async function postCommand(body: object): Promise<StatusPayload> {
   const res = await fetch(ROUTE_PATH, {
     method: 'POST', headers, body: payload,
   })
+  const data = await res.json().catch(() => null)
+  if (res.ok && data?.ok === true && data.value) return data.value
+  throw new Error((data?.error?.message) || `POST ${ROUTE_PATH} failed (${res.status})`)
+}
+// OP-44: 直接调用 host 'discover' / 'addModels' 操作；返回原始 value（不是 status）
+async function postRaw(body: object): Promise<any> {
+  const payload = JSON.stringify(body)
+  if (payload.length > MAX_BODY_BYTES) throw new Error('payload too large')
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (authToken) headers['X-BMS-Token'] = authToken
+  const res = await fetch(ROUTE_PATH, { method: 'POST', headers, body: payload })
   const data = await res.json().catch(() => null)
   if (res.ok && data?.ok === true && data.value) return data.value
   throw new Error((data?.error?.message) || `POST ${ROUTE_PATH} failed (${res.status})`)
@@ -484,6 +509,9 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
 
   const [editingProvider, setEditingProvider] = React.useState<string | null>(null)
   const [modelDraft, setModelDraft] = React.useState<Record<string, Record<string, { id?: string; name: string; context: string; maxTokens: string; tiers?: string[]; input?: string }>>>({})
+  // OP-39: 编辑器内被 ✕ 显式删除的 model id 列表（按 provider 聚合）；
+  // 提交时随 apply 一起发给 host 让其从 settings.yaml 中真正删除（之前只清本地草稿、不真删）
+  const [deletedModelIds, setDeletedModelIds] = React.useState<Record<string, string[]>>({})
   // 编辑中的 provider 级字段草案（显示名称 / Base URL / API Key 环境变量 / Provider ID 重命名）
   const [providerDraft, setProviderDraft] = React.useState<{ displayName: string; baseURL: string; apiKeyEnv: string; newProviderId: string } | null>(null)
 
@@ -505,6 +533,18 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
   const [deleteTarget, setDeleteTarget] = React.useState<string | null>(null)
   const [deleting, setDeleting] = React.useState(false)
   const [deleteFailure, setDeleteFailure] = React.useState('')
+
+  // OP-45: 「同步上游」弹窗状态
+  // providerSyncTarget: { mode: 'single' | 'all', provider?: string } — 哪个 provider 触发的同步
+  // providerSyncGroups:   拉取结果（每个 provider 一组 DiscoveredModel）
+  // providerSyncPicked:   每个 provider 下被用户勾选的 model id 集合
+  // discoverBusy:         哪个 provider 正在拉取（用于按钮 loading 态）；'__all__' = 全局批量拉取中
+  const [providerSyncTarget, setProviderSyncTarget] = React.useState<{ mode: 'single' | 'all'; provider?: string } | null>(null)
+  const [providerSyncGroups, setProviderSyncGroups] = React.useState<ProviderSyncGroup[]>([])
+  const [providerSyncPicked, setProviderSyncPicked] = React.useState<Record<string, Set<string>>>({})
+  const [providerSyncBusy, setProviderSyncBusy] = React.useState(false)
+  const [providerSyncError, setProviderSyncError] = React.useState('')
+  const [discoverBusy, setDiscoverBusy] = React.useState<string>('')
 
   const applyStatus = (status: StatusPayload, opts?: { keepSetting?: boolean }) => {
     // 排序：启用提供方按 providerOrder 排序在前，禁用的自动排到末尾，
@@ -559,6 +599,7 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
     setModelDraft((p) => { const n = { ...p }; delete n[provider]; return n })
     setProviderDraft(null)
     setPendingCloseProvider(null)
+    setDeletedModelIds((p) => { const n = { ...p }; delete n[provider]; return n })
   }
   // 关闭编辑器前检查是否有未保存修改；discard=true 直接丢弃草稿关闭
   const requestCloseEditor = async (provider: string, opts?: { saveFirst?: boolean; discard?: boolean }) => {
@@ -693,9 +734,106 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
     ...prev,
     [provider]: { ...(prev[provider] || {}), [`${NEW_MODEL_PREFIX}${++addModelUid}`]: { id: '', name: '', context: '', maxTokens: '', tiers: [] } },
   }))
-  const removeEditModelRow = (provider: string, key: string) => setModelDraft((prev) => {
-    const next = { ...(prev[provider] || {}) }; delete next[key]; return { ...prev, [provider]: next }
-  })
+  const removeEditModelRow = (provider: string, key: string) => {
+    setModelDraft((prev) => {
+      const next = { ...(prev[provider] || {}) }; delete next[key]; return { ...prev, [provider]: next }
+    })
+    // 若被删的是已存在的 model（key 不是 NEW_MODEL_PREFIX），记入删除列表，等 save 时交给 host 真删
+    if (!key.startsWith(NEW_MODEL_PREFIX)) {
+      setDeletedModelIds((prev) => {
+        const cur = prev[provider] || []
+        if (cur.includes(key)) return prev
+        return { ...prev, [provider]: [...cur, key] }
+      })
+    }
+    setDirty(true)
+  }
+
+  // OP-45: 同步上游弹窗逻辑
+  // 单 provider 同步：编辑器内 "同步上游" 按钮触发
+  const openProviderSync = async (provider: string) => {
+    setDiscoverBusy(provider); setProviderSyncError('')
+    try {
+      const result: any = await postRaw({ op: 'discover', provider, request: {} })
+      const models: DiscoveredModel[] = Array.isArray(result?.models) ? result.models : []
+      setProviderSyncGroups([{ provider, displayName: provider, ok: true, models }])
+      // OP-46: 默认全部未选 — 与官方 fetchModels 行为一致；用户主动勾选要加的
+      setProviderSyncPicked({ [provider]: new Set() })
+      setProviderSyncTarget({ mode: 'single', provider })
+    } catch (error: any) {
+      setSaveMsg('同步失败: ' + (error?.message || String(error)), true)
+    } finally { setDiscoverBusy('') }
+  }
+  // 全局同步：顶部 "一键同步所有上游" 按钮触发（OP-47）—— 遍历 status.syncableProviders
+  const openGlobalSync = async () => {
+    // 重新拉一次 status 拿最新 syncableProviders
+    let providers: Array<{ provider: string; displayName: string; baseURL?: string; apiKeyEnv?: string; api?: string }> = []
+    try {
+      const st: any = await getStatus()
+      providers = Array.isArray(st?.syncableProviders) ? st.syncableProviders : []
+    } catch { providers = [] }
+    if (providers.length === 0) { setSaveMsg('没有可同步的上游（未配置 baseURL 的自定义提供方或未启用的内置提供方）', true); return }
+    setDiscoverBusy('__all__'); setProviderSyncError(''); setProviderSyncBusy(true)
+    const groups: ProviderSyncGroup[] = []
+    for (const p of providers) {
+      try {
+        const result: any = await postRaw({ op: 'discover', provider: p.provider, request: {} })
+        const models: DiscoveredModel[] = Array.isArray(result?.models) ? result.models : []
+        groups.push({ provider: p.provider, displayName: p.displayName, ok: true, models })
+      } catch (error: any) {
+        groups.push({ provider: p.provider, displayName: p.displayName, ok: false, models: [], error: error?.message || String(error) })
+      }
+    }
+    setProviderSyncGroups(groups)
+    // OP-46: 默认全部未选
+    const picked: Record<string, Set<string>> = {}
+    for (const g of groups) picked[g.provider] = new Set()
+    setProviderSyncPicked(picked)
+    setProviderSyncTarget({ mode: 'all' })
+    setProviderSyncBusy(false); setDiscoverBusy('')
+  }
+  const toggleSyncPicked = (provider: string, modelId: string) => {
+    setProviderSyncPicked((prev) => {
+      const cur = new Set(prev[provider] || [])
+      if (cur.has(modelId)) cur.delete(modelId); else cur.add(modelId)
+      return { ...prev, [provider]: cur }
+    })
+  }
+  const toggleAllInGroup = (provider: string, on: boolean) => {
+    setProviderSyncPicked((prev) => {
+      const group = providerSyncGroups.find((g) => g.provider === provider)
+      if (!group) return prev
+      return { ...prev, [provider]: on ? new Set(group.models.map((m) => m.id)) : new Set() }
+    })
+  }
+  const closeProviderSync = () => {
+    setProviderSyncTarget(null); setProviderSyncGroups([]); setProviderSyncPicked({}); setProviderSyncError('')
+  }
+  // 提交选中：把每个 provider 的 picked 集合展开成 { id, name?, contextWindow?, maxTokens? }，一次性 addModels
+  const submitProviderSync = async () => {
+    if (!providerSyncTarget) return
+    const providerAddModels: Record<string, DiscoveredModel[]> = {}
+    let total = 0
+    for (const g of providerSyncGroups) {
+      const picked = providerSyncPicked[g.provider]
+      if (!picked || picked.size === 0) continue
+      const entries: DiscoveredModel[] = []
+      for (const m of g.models) if (picked.has(m.id)) entries.push(m)
+      if (entries.length > 0) { providerAddModels[g.provider] = entries; total += entries.length }
+    }
+    if (total === 0) { closeProviderSync(); return }
+    setProviderSyncBusy(true)
+    try {
+      const status: any = await postRaw({ op: 'addModels', providerAddModels })
+      // 拉新 status 让 UI 刷新（applyStatus 也可）
+      if (status) applyStatus(status)
+      closeProviderSync()
+      setSaveMsg(text('savedProvider', '已保存。'))
+      setTimeout(() => setSaveMsg(''), 1500)
+    } catch (error: any) {
+      setProviderSyncError('保存失败: ' + (error?.message || String(error)))
+    } finally { setProviderSyncBusy(false) }
+  }
   const updateEditModelRow = (provider: string, key: string, patch: Partial<{ id: string; name: string; context: string; maxTokens: string; tiers: string[] }>) =>
     setModelDraft((prev) => ({
       ...prev,
@@ -803,6 +941,9 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
           }
           body.providerModels = { [provider]: edits }
         }
+        // OP-39: 把 ✕ 删除的 model ids 一并提交给 host
+        const deletes = deletedModelIds[provider]
+        if (deletes && deletes.length > 0) body.providerDeleteModels = { [provider]: deletes }
         // Provider 级字段变更（显示名称 / Base URL / API Key env / Provider ID 重命名）
         const pd = providerDraft
         if (pd) {
@@ -914,6 +1055,8 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
               } else {
                 setEditingProvider(provider)
                 setDirty(false)
+                // 打开编辑器时清空本 provider 的"待删 model 列表"——之前的删除若没保存已经丢弃
+                setDeletedModelIds((p) => { const n = { ...p }; delete n[provider]; return n })
                 // 初始化 provider 级草案（显示名称 / Base URL / API Key env / Provider ID）
                 setProviderDraft({
                   displayName: row.displayName,
@@ -1002,6 +1145,12 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
                     React.createElement('p', { className: 'bms-modelCatalogMeta' },
                       row.models.length > 0 ? text('modelsCustomized') : text('modelsInherited')),
                   ]),
+                  // OP-45: 编辑器内 "同步上游" 按钮 — 与官方 discoverModels 同样语义
+                  React.createElement('button', {
+                    type: 'button', className: 'bms-linkButton', key: 'syncUpstream',
+                    disabled: saveBusy || writable === false || discoverBusy === provider,
+                    onClick: () => void openProviderSync(provider),
+                  }, discoverBusy === provider ? text('fetching', '正在拉取…') : text('syncUpstream', '同步上游')),
                   row.models.length === 0 ? React.createElement('p', { className: 'bms-modelEmpty' }, text('modelsEmpty')) : null,
                   React.createElement('div', { className: 'bms-modelList' }, row.models.map((model: ModelRow) => {
                     const available = model.tiers || []
@@ -1232,14 +1381,19 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
       key: 'status', role: 'status', 'aria-live': 'polite',
     }, saveStatus) : null,
 
-    // 添加官方模型按钮（右上角）
-    !officialAdded ? React.createElement('div', { key: 'officialActions', style: { display: 'flex', justifyContent: 'flex-end' } }, [
+    // 顶部工具条：全局「同步上游」按钮（OP-47）+ 添加官方模型按钮
+    React.createElement('div', { key: 'topActions', style: { display: 'flex', justifyContent: 'flex-end', gap: 8, flexWrap: 'wrap' } }, [
       React.createElement('button', {
+        type: 'button', className: 'bms-secondaryButton',
+        key: 'syncAll', disabled: writable === false || discoverBusy === '__all__',
+        onClick: () => void openGlobalSync(),
+      }, discoverBusy === '__all__' ? text('fetching', '正在拉取…') : text('syncUpstreamAll', '一键同步所有上游')),
+      !officialAdded ? React.createElement('button', {
         type: 'button', className: 'bms-primaryButton',
-        disabled: writable === false,
+        key: 'addOfficial', disabled: writable === false,
         onClick: () => { setShowOfficialForm(true); setOfficialError('') },
-      }, '+ 添加官方模型'),
-    ]) : null,
+      }, '+ 添加官方模型') : null,
+    ]),
 
     // 添加官方模型表单
     showOfficialForm && !officialAdded ? React.createElement('div', { className: 'bms-addCard', key: 'officialForm' }, [
@@ -1439,6 +1593,65 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
             type: 'button', className: 'bms-secondaryButton',
             onClick: () => setPendingCloseProvider(null),
           }, '取消'),
+        ]),
+      ]),
+    ]) : null,
+
+    // OP-45: 同步上游 picker 弹窗（单 provider + 全局两种模式共用）
+    providerSyncTarget ? React.createElement('div', {
+      className: 'bms-overlay', key: 'syncOverlay',
+      onClick: () => !providerSyncBusy && closeProviderSync(),
+      onKeyDown: (e: any) => { if (e.key === 'Escape' && !providerSyncBusy) closeProviderSync() },
+    }, [
+      React.createElement('div', {
+        className: 'bms-dialog', key: 'syncDialog',
+        style: { minWidth: 480, maxWidth: 640, maxHeight: '80vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' },
+        onClick: (e: any) => e.stopPropagation(),
+      }, [
+        React.createElement('h3', { className: 'bms-dialogTitle' },
+          providerSyncTarget.mode === 'all' ? text('syncUpstreamAllTitle', '同步所有上游模型') : text('syncUpstreamOneTitle', '同步 {provider} 的上游模型').replace('{provider}', providerSyncTarget.provider || '')),
+        React.createElement('p', { className: 'bms-dialogDesc' }, text('syncUpstreamHint', '勾选要添加的模型（默认全部未选）；已存在于本提供方下的会跳过。')),
+        providerSyncError ? React.createElement('p', { className: 'bms-error' }, providerSyncError) : null,
+        React.createElement('div', {
+          key: 'scroll', style: { overflowY: 'auto', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8, paddingRight: 4 },
+        }, providerSyncGroups.map((g) => {
+          const picked = providerSyncPicked[g.provider] || new Set<string>()
+          const allPicked = g.models.length > 0 && g.models.every((m) => picked.has(m.id))
+          return React.createElement('div', { key: g.provider, className: 'bms-addCard', style: { padding: 8 } }, [
+            React.createElement('div', {
+              key: 'header',
+              style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+            }, [
+              React.createElement('strong', { key: 'name' }, g.displayName),
+              g.ok && g.models.length > 0 ? React.createElement('button', {
+                type: 'button', className: 'bms-linkButton', key: 'toggleAll',
+                disabled: providerSyncBusy,
+                onClick: () => toggleAllInGroup(g.provider, !allPicked),
+              }, allPicked ? text('fetchDeselectAll', '全部取消') : text('fetchSelectAll', '全部选择')) : null,
+            ]),
+            !g.ok ? React.createElement('p', { className: 'bms-error', key: 'err' }, g.error || '拉取失败') : null,
+            g.ok && g.models.length === 0 ? React.createElement('p', { className: 'bms-modelEmpty', key: 'empty' }, text('fetchEmpty', '上游未公布任何模型')) : null,
+            ...g.models.map((m) => React.createElement('label', { key: m.id, className: 'bms-chip', style: { marginRight: 4, marginBottom: 4 } }, [
+              React.createElement('input', {
+                type: 'checkbox', className: 'bms-chipInput', key: 'cb',
+                checked: picked.has(m.id), disabled: providerSyncBusy,
+                onChange: () => toggleSyncPicked(g.provider, m.id),
+              }),
+              React.createElement('span', { className: 'bms-chipText', key: 't' },
+                m.id + (m.name ? ` (${m.name})` : '') + (typeof m.contextWindow === 'number' ? ` · ${m.contextWindow}` : '')),
+            ])),
+          ])
+        })),
+        React.createElement('div', { className: 'bms-dialogActions' }, [
+          React.createElement('button', {
+            type: 'button', className: 'bms-secondaryButton', key: 'cancel',
+            disabled: providerSyncBusy, onClick: closeProviderSync,
+          }, text('cancel', '取消')),
+          React.createElement('button', {
+            type: 'button', className: 'bms-primaryButton', key: 'ok',
+            disabled: providerSyncBusy,
+            onClick: () => void submitProviderSync(),
+          }, providerSyncBusy ? text('applying', '保存中…') : text('fetchAdopt', '采用所选')),
         ]),
       ]),
     ]) : null,
