@@ -1560,7 +1560,8 @@ function BetterModelSettingPanel(props: any): React.ReactElement {
       React.createElement('div', { className: 'bms-dialog', key: 'dialog', onClick: (e: any) => e.stopPropagation() }, [
         React.createElement('h3', { className: 'bms-dialogTitle' },
           text('deleteTitle').replace('{provider}', rows.find((r) => r.provider === deleteTarget)?.displayName || deleteTarget)),
-        React.createElement('p', { className: 'bms-dialogDesc' }, text('deleteDescription')),
+        React.createElement('p', { className: 'bms-dialogDesc' },
+          text('deleteDescription').replace('{provider}', rows.find((r) => r.provider === deleteTarget)?.displayName || deleteTarget)),
         deleteFailure ? React.createElement('p', { className: 'bms-error' }, deleteFailure) : null,
         React.createElement('div', { className: 'bms-dialogActions' }, [
           React.createElement('button', {

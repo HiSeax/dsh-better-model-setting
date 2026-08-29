@@ -24,14 +24,17 @@
 ### 编辑器展开 / Editor Expanded
 ![Editor Expanded](assets/02-editor-expanded.png)
 
-### 添加官方模型 / Add Official Model
-![Add Official](assets/03-add-official.png)
+### 同步上游模型 / Sync Upstream Models
+![Sync Upstream](assets/03-sync-upstream.png)
 
 ### 添加自定义提供方 / Add Custom Provider
 ![Add Custom](assets/04-add-custom.png)
 
 ### 删除确认 / Delete Confirmation
 ![Delete Dialog](assets/05-delete-dialog.png)
+
+### 添加官方模型 / Add Official Model
+![Add Official](assets/06-add-official.png)
 
 ---
 

@@ -1,22 +1,27 @@
 {
   "name": "dsh-better-model-setting",
-  "version": "0.3.0",
-  "description": "DSH plugin that replaces the official Models settings page: provider management, per-model reasoning effort, retry overrides, drag reorder, credential status, route token auth, **upstream model sync (per-provider + global, default unselected)**, and fixed ✕-delete-model bug",
+  "version": "0.3.1",
+  "description": "DSH plugin that replaces the official Models settings page: provider management, per-model reasoning effort, retry overrides, drag reorder, credential status, upstream model sync, and fixed model deletion",
   "private": false,
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HiSeax/dsh-better-model-setting.git"
+  },
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
   "license": "BSD-3-Clause",
   "peerDependencies": {
-    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
-    "@deepseek-ai/dsh-settings": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <0.1.0 || >=0.1.0-rc <2",
+    "@deepseek-ai/dsh-settings": ">=0.0.1-rc <0.1.0 || >=0.1.0-rc <2",
     "@deepseek-ai/cordis": ">=4.0.0-rc <5",
     "@deepseek-ai/schemastery": "^3.18.0",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2",
-    "@deepseek-ai/dsh-client-runtime": ">=0.0.1-rc <2"
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <0.1.0 || >=0.1.0-rc <2",
+    "@deepseek-ai/dsh-client-runtime": ">=0.0.1-rc <0.1.0 || >=0.1.0-rc <2"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
@@ -40,6 +45,9 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-runtime",

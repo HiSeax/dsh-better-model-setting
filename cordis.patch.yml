@@ -1,0 +1,11 @@
+# One package, two halves: this patch inserts the single plugin row that mounts
+# the host side (settings namespace, loopback config route, request guards,
+# retry overrides) and lets the browser half be discovered through the
+# package.json `dsh.client` declaration (lib/client.js, the Models settings
+# page replacement panel).
+#
+# Install: dsh plugin --profile <name> add dsh-better-model-setting
+
+- insert:
+    - id: better-model-setting
+      name: dsh-better-model-setting
